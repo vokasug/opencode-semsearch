@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# oc-semsearch — CLI обёртка над semsearch_index.py / semsearch_engine.py
+#
+# Usage:
+#   oc-semsearch query "<text>"           # прямой семантический поиск
+#   oc-semsearch query "<text>" --role user --top 5
+#   oc-semsearch build                    # перестроить индекс
+#   oc-semsearch stats                    # сколько проиндексировано
+#   oc-semsearch list-uncached            # сколько ждёт индексации
+#   oc-semsearch reindex ses_XYZ...       # переиндексировать конкретные
+#   oc-semsearch doctor                   # self-check
+#   oc-semsearch purge                    # удалить index
+#   oc-semsearch upgrade                  # git pull + reinstall
+#   oc-semsearch install                  # повторный install
+#   oc-semsearch uninstall                # полный откат
+set -euo pipefail
+
+VENV_PY="${VENV_PY:-$HOME/.local/share/venvs/semsearch/bin/python}"
+TOOLS_DIR="${TOOLS_DIR:-$HOME/.config/opencode/tools}"
+REPO_DIR="${REPO_DIR:-$HOME/code/opencode-semsearch}"
+PYTHON="${PYTHON:-python3}"
+
+die() { printf "\033[31m✗\033[0m %s\n" "$*" >&2; exit 1; }
+
+ensure_venv() {
+    if [ ! -x "$VENV_PY" ]; then
+        printf "venv not found at %s — запусти ./install.sh\n" "$VENV_PY" >&2
+        exit 1
+    fi
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+    query)
+        ensure_venv
+        # Pass remaining args as engine args
+        payload='{"query":'
+        # Take first positional as query
+        if [ $# -lt 1 ]; then die "usage: oc-semsearch query <text> [--top N] [--role user|assistant|any] [--since-days N] [--no-active-only]"; fi
+        q="$1"; shift
+        # build JSON via python
+        payload=$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1] or '{}'); d.setdefault('top',10); d.setdefault('role','any'); d['only_active']=True; d['since_days']=None; print(json.dumps(d))" "{\"query\":\"$q\"}")
+        # Now parse flags and merge
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --top)   payload=$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); d['top']=int(sys.argv[2]); print(json.dumps(d))" "$payload" "$2"); shift 2 ;;
+                --role)  payload=$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); d['role']=sys.argv[2]; print(json.dumps(d))" "$payload" "$2"); shift 2 ;;
+                --since-days) payload=$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); d['since_days']=int(sys.argv[2]); print(json.dumps(d))" "$payload" "$2"); shift 2 ;;
+                --no-active-only) payload=$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); d['only_active']=False; print(json.dumps(d))" "$payload"); shift ;;
+                *) die "unknown flag: $1" ;;
+            esac
+        done
+        "$VENV_PY" "$TOOLS_DIR/semsearch_engine.py" "$payload" \
+            | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(f'indexed_new={d.get(\"indexed_new_messages\",0)} model={d.get(\"model\")} dim={d.get(\"dim\")}')
+print(f'timings_ms: {d.get(\"timings_ms\")}')
+print()
+for i, r in enumerate(d.get('results', []), 1):
+    print(f'  [{i}] {r[\"score\"]:.4f}  {r[\"role\"]:9s}  {r[\"session_title\"]}')
+    print(f'        session={r[\"session_id\"]}  msg={r[\"message_id\"]}')
+    print(f'        preview: {r[\"preview\"][:140]}{\"...\" if len(r[\"preview\"])>140 else \"\"}')
+    print()
+"
+        ;;
+
+    build|stats|list-uncached|doctor|purge)
+        ensure_venv
+        "$VENV_PY" "$TOOLS_DIR/semsearch_index.py" --$cmd
+        ;;
+
+    reindex)
+        ensure_venv
+        "$VENV_PY" "$TOOLS_DIR/semsearch_index.py" --reindex "$@"
+        ;;
+
+    upgrade)
+        cd "$REPO_DIR" || die "repo not found at $REPO_DIR"
+        git pull --rebase --autostash
+        ./install.sh
+        ;;
+
+    install)
+        cd "$REPO_DIR" || die "repo not found at $REPO_DIR"
+        ./install.sh
+        ;;
+
+    uninstall)
+        cd "$REPO_DIR" || die "repo not found at $REPO_DIR"
+        ./uninstall.sh
+        ;;
+
+    help|--help|-h)
+        cat <<EOF
+oc-semsearch — CLI for OpenCode semantic session search
+
+Commands:
+  query <text> [opts]      прямой семантический поиск
+    --top N                  сколько результатов (default 10, max 50)
+    --role user|assistant|any    фильтр по автору
+    --since-days N           только сессии последних N дней
+    --no-active-only         включить архивные
+  build                     перестроить индекс
+  stats                     статистика
+  list-uncached             сколько ждёт индексации
+  reindex ses_X...          переиндексировать конкретные сессии
+  doctor                    self-check
+  purge                     удалить sidecar index
+  upgrade                   git pull + reinstall
+  install                   повторный install
+  uninstall                 полный откат (--purge-index для удаления индекса)
+
+Env:
+  VENV_PY     путь к venv python
+  TOOLS_DIR   где лежат тулы
+  REPO_DIR    где репо
+EOF
+        ;;
+
+    *)
+        die "unknown command: $cmd (try 'oc-semsearch help')"
+        ;;
+esac
