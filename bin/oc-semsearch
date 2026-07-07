@@ -17,7 +17,7 @@ set -euo pipefail
 
 VENV_PY="${VENV_PY:-$HOME/.local/share/venvs/semsearch/bin/python}"
 TOOLS_DIR="${TOOLS_DIR:-$HOME/.config/opencode/tools}"
-REPO_DIR="${REPO_DIR:-$HOME/code/opencode-semsearch}"
+REPO_DIR="${REPO_DIR:-$HOME/gdrive/Tools/opencode-semsearch}"
 PYTHON="${PYTHON:-python3}"
 
 die() { printf "\033[31m✗\033[0m %s\n" "$*" >&2; exit 1; }
