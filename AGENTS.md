@@ -141,7 +141,7 @@ OpenCode runtime (Bun в CLI / Node в TUI) вызывает `execute()` в `lib
 | `<system-reminder>` блоки в индексируемом тексте | regex `_SYSTEM_BLOCK_RE.sub("", text)` перед embed. Замедляют токенизацию в 100×. |
 | `reasoning`-части по 50-80K символов | Фильтр `json_extract(...,'$.type') = 'text'` — reasoning пропускаем. |
 | `Bun.$` не работает в Electron-рендерере (TUI) | Используем `node:child_process/execFile`. |
-| Тул умирал по таймауту 180s на большом бэклоге догонки | Таймаут 20 мин (`SEMSEARCH_TIMEOUT_MS`); в engine лимит `SEMSEARCH_LAZY_MAX` (default 300 эмбеддингов/вызов, skipped не считаются — иначе бы блокировали голову очереди навсегда). `--build` крутит цикл до `index_pending == 0`. |
+| Тул умирал по таймауту 180s на большом бэклоге догонки | Таймаут 20 мин (`SEMSEARCH_TIMEOUT_MS`). Лимит догонки `SEMSEARCH_LAZY_MAX` по умолчанию 0 = без лимита (догоняем всё, иначе поиск не видит свежие сообщения; skipped в лимит не считаются). `--build` крутит цикл до `index_pending == 0` как страховка. |
 | «Engine failed» без причины в TUI | Движок пишет JSON-ошибку в **stdout**, traceback — в **stderr**. Обёртка показывает оба (stdout первые 400, stderr хвост 400). |
 | `database is locked` при параллельных сессиях | `index.db` в WAL + `busy_timeout=30000` (ставится в `_ensure_index()`). |
 | Google Drive медленно синхронизирует `.git/` (много мелких файлов) | Репо работает; синк просто медленнее. Если мешает — добавить `.git` в Drive exclude. |

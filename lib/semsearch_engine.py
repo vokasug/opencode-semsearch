@@ -27,10 +27,10 @@ QUERY_INSTRUCT = (
     "relevant message that matches the query's intent."
 )
 LAZY_BATCH = int(os.environ.get("SEMSEARCH_BATCH", "32"))
-# максимум ЭМБЕДДИНГОВ догонки за один вызов — чтобы первый запуск на
-# большом бэклоге не упирался в таймаут тула; остаток доиндексируется
-# следующими вызовами (skipped-сообщения в лимит не считаются)
-LAZY_MAX_PER_RUN = int(os.environ.get("SEMSEARCH_LAZY_MAX", "300"))
+# лимит эмбеддингов догонки за один вызов; 0 = без лимита (полная
+# догонка каждый раз — таймаут тула 20 мин покрывает любой реалистичный
+# бэклог). Env-override оставлен для экзотических случаев
+LAZY_MAX_PER_RUN = int(os.environ.get("SEMSEARCH_LAZY_MAX", "0"))
 
 # ============ EMBED BACKENDS ============
 class Embedder:
@@ -211,7 +211,7 @@ def lazy_index(idx_con, src_con, *, only_new=True):
     # сообщения (без text) не получают записи в индексе и иначе
     # навсегда блокировали бы голову очереди
     for i in range(0, len(todo_rows), LAZY_BATCH):
-        if added >= LAZY_MAX_PER_RUN:
+        if LAZY_MAX_PER_RUN and added >= LAZY_MAX_PER_RUN:
             break
         batch = todo_rows[i:i+LAZY_BATCH]
         processed = i + len(batch)
