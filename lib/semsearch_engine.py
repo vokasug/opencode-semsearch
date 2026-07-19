@@ -158,6 +158,25 @@ def _strip_system_blocks(text):
 
 def lazy_index(idx_con, src_con, *, only_new=True):
     cur = idx_con.cursor()
+
+    # prune: вычищаем вектора сообщений, которых больше нет в opencode.db
+    # (удалённые сессии/сообщения), иначе поиск находил бы удалённое.
+    # opencode.db приатачена read-only, пишем только в message_vec
+    idx_con.execute(f"ATTACH DATABASE 'file:{DB_SRC}?mode=ro' AS src")
+    try:
+        cur.execute("""
+          DELETE FROM message_vec
+          WHERE NOT EXISTS (
+            SELECT 1 FROM src.message m WHERE m.id = message_vec.message_id
+          )
+        """)
+        pruned = cur.rowcount
+        idx_con.commit()
+    finally:
+        idx_con.execute("DETACH DATABASE src")
+    if pruned:
+        sys.stderr.write(f"[semsearch] pruned {pruned} orphan vectors\n")
+
     # attach the index DB so the NOT EXISTS subquery can find `message_vec`
     src_con.execute("ATTACH DATABASE ? AS idx", (IDX,))
     try:
@@ -184,7 +203,7 @@ def lazy_index(idx_con, src_con, *, only_new=True):
     finally:
         src_con.execute("DETACH DATABASE idx")
     if not todo_rows:
-        return {"added": 0, "skipped": 0, "pending": 0}
+        return {"added": 0, "skipped": 0, "pending": 0, "pruned": pruned}
 
     # для каждого сообщения — подтянуть все его text-части (НЕ reasoning,
     # reasoning может быть огромным — 50-80K символов — и здорово тормозит
@@ -266,7 +285,8 @@ def lazy_index(idx_con, src_con, *, only_new=True):
         sys.stderr.write(
             f"[semsearch] lazy_index: capped at {LAZY_MAX_PER_RUN} "
             f"embeddings, {pending} still pending\n")
-    return {"added": added, "skipped": skipped, "pending": pending}
+    return {"added": added, "skipped": skipped, "pending": pending,
+            "pruned": pruned}
 
 def _filter_sessions(src_con, only_active, since_days):
     where, params = [], []
@@ -287,6 +307,7 @@ def search(idx_con, src_con, query, *, top, role_filter, only_active, since_days
     timings["indexed_new_messages"] = info["added"]
     timings["indexed_skipped"] = info.get("skipped", 0)
     timings["index_pending"] = info.get("pending", 0)
+    timings["pruned_orphans"] = info.get("pruned", 0)
 
     t0 = time.time()
     allowed = _filter_sessions(src_con, only_active, since_days)
