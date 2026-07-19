@@ -27,6 +27,10 @@ QUERY_INSTRUCT = (
     "relevant message that matches the query's intent."
 )
 LAZY_BATCH = int(os.environ.get("SEMSEARCH_BATCH", "32"))
+# максимум ЭМБЕДДИНГОВ догонки за один вызов — чтобы первый запуск на
+# большом бэклоге не упирался в таймаут тула; остаток доиндексируется
+# следующими вызовами (skipped-сообщения в лимит не считаются)
+LAZY_MAX_PER_RUN = int(os.environ.get("SEMSEARCH_LAZY_MAX", "300"))
 
 # ============ EMBED BACKENDS ============
 class Embedder:
@@ -95,7 +99,13 @@ def cosine(a, b):
 # ============ DB ============
 def _ensure_index():
     new = not p.exists(IDX)
-    con = sqlite3.connect(IDX)
+    # busy_timeout=30s: переживаем конкурентные вызовы semsearch из
+    # параллельных сессий OpenCode вместо мгновенного "database is locked"
+    con = sqlite3.connect(IDX, timeout=30)
+    # WAL — читатели не блокируют писателя, безопаснее при параллельных
+    # процессах
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=30000")
     if new:
         con.executescript("""
             CREATE TABLE message_vec(
@@ -174,7 +184,7 @@ def lazy_index(idx_con, src_con, *, only_new=True):
     finally:
         src_con.execute("DETACH DATABASE idx")
     if not todo_rows:
-        return {"added": 0, "skipped": 0}
+        return {"added": 0, "skipped": 0, "pending": 0}
 
     # для каждого сообщения — подтянуть все его text-части (НЕ reasoning,
     # reasoning может быть огромным — 50-80K символов — и здорово тормозит
@@ -196,8 +206,15 @@ def lazy_index(idx_con, src_con, *, only_new=True):
         parts_by_msg.setdefault(mid, []).append(txt)
 
     added, skipped = 0, 0
+    processed = 0
+    # cap по ЭМБЕДДИНГАМ за запуск, а не по scanned-строкам: skipped
+    # сообщения (без text) не получают записи в индексе и иначе
+    # навсегда блокировали бы голову очереди
     for i in range(0, len(todo_rows), LAZY_BATCH):
+        if added >= LAZY_MAX_PER_RUN:
+            break
         batch = todo_rows[i:i+LAZY_BATCH]
+        processed = i + len(batch)
         texts, rows = [], []
         for mid, sid, ttl, tc, role in batch:
             chunks = parts_by_msg.get(mid, [])
@@ -232,13 +249,24 @@ def lazy_index(idx_con, src_con, *, only_new=True):
             new_rows)
         idx_con.commit()
         added += len(new_rows)
+        sys.stderr.write(
+            f"[semsearch] lazy_index: {min(i+LAZY_BATCH, len(todo_rows))}"
+            f"/{len(todo_rows)} messages processed\n")
     cur.execute("INSERT OR REPLACE INTO meta VALUES "
                 "('last_catchup', strftime('%s','now'))")
     cur.execute("INSERT OR REPLACE INTO meta VALUES ('backend', ?)",
                 (type(_embedder()).__name__,))
     cur.execute("INSERT OR REPLACE INTO meta VALUES ('dim', ?)",  (str(DIM),))
     idx_con.commit()
-    return {"added": added, "skipped": skipped}
+    # pending = сообщения с текстом, которые не успели за этот запуск
+    pending = 0
+    if processed < len(todo_rows):
+        pending = sum(1 for r in todo_rows[processed:]
+                      if parts_by_msg.get(r[0]))
+        sys.stderr.write(
+            f"[semsearch] lazy_index: capped at {LAZY_MAX_PER_RUN} "
+            f"embeddings, {pending} still pending\n")
+    return {"added": added, "skipped": skipped, "pending": pending}
 
 def _filter_sessions(src_con, only_active, since_days):
     where, params = [], []
@@ -258,6 +286,7 @@ def search(idx_con, src_con, query, *, top, role_filter, only_active, since_days
     timings["index_catchup_ms"] = int((time.time()-t0)*1000)
     timings["indexed_new_messages"] = info["added"]
     timings["indexed_skipped"] = info.get("skipped", 0)
+    timings["index_pending"] = info.get("pending", 0)
 
     t0 = time.time()
     allowed = _filter_sessions(src_con, only_active, since_days)

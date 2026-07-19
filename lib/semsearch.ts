@@ -9,6 +9,7 @@ const ENGINE_SCRIPT = path.join(import.meta.dirname, "semsearch_engine.py")
 const VENV_PYTHON =
   process.env.SEMSEARCH_PYTHON ||
   `${process.env.HOME}/.local/share/venvs/semsearch/bin/python`
+const TIMEOUT_MS = Number(process.env.SEMSEARCH_TIMEOUT_MS) || 1_200_000
 
 export default tool({
   description:
@@ -46,13 +47,20 @@ export default tool({
       const { stdout, stderr } = await pExecFile(
         VENV_PYTHON,
         [ENGINE_SCRIPT, payload],
-        { maxBuffer: 16 * 1024 * 1024, timeout: 180_000 },
+        { maxBuffer: 16 * 1024 * 1024, timeout: TIMEOUT_MS },
       )
       if (stderr) process.stderr.write(`[semsearch] ${stderr}\n`)
       return stdout.trim()
     } catch (e: any) {
-      const msg = e?.stderr || e?.message || String(e)
-      throw new Error(`semsearch engine failed: ${msg.slice(0, 500)}`)
+      const parts: string[] = []
+      if (e?.killed || e?.signal === "SIGTERM")
+        parts.push(`killed by timeout (${TIMEOUT_MS / 1000}s)`)
+      // engine пишет JSON с {"error","detail"} в stdout — показываем его первым
+      if (e?.stdout) parts.push(`stdout: ${e.stdout.trim().slice(0, 400)}`)
+      // из stderr важен хвост (traceback), а не прогресс-бары в начале
+      if (e?.stderr) parts.push(`stderr: ${e.stderr.trim().slice(-400)}`)
+      if (!parts.length) parts.push(e?.message || String(e))
+      throw new Error(`semsearch engine failed: ${parts.join(" | ")}`)
     }
   },
 })

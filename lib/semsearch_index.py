@@ -64,13 +64,9 @@ def cmd_purge():
     return 0
 
 def _run_engine_catchup():
-    """Запустить engine.py — он сам сделает lazy_index."""
+    """Запускать engine.py (он сам делает lazy_index), пока есть pending."""
     if not p.exists(ENGINE):
         _err(f"engine not found: {ENGINE}")
-        return 1
-    n = len(sys.argv) - 1
-    argv = list(sys.argv[1:])
-    if len(argv) < 1:
         return 1
     payload = json.dumps({
         "query":"", "top":1, "role":"any",
@@ -81,15 +77,27 @@ def _run_engine_catchup():
     proc_env = os.environ.copy()
     proc_env["PYTHONPATH"] = p.dirname(ENGINE)
     import subprocess
-    res = subprocess.run(
-        [_venv_python(), ENGINE, payload],
-        capture_output=True, text=True, env=proc_env,
-    )
-    if res.returncode != 0:
-        _err(f"engine failed: {res.stderr.strip()[:300]}")
-        return 1
-    print(res.stdout.strip())
-    return 0
+    # engine режет догонку лимитом SEMSEARCH_LAZY_MAX на вызов —
+    # для build крутим цикл до полной индексации
+    for _ in range(100):
+        res = subprocess.run(
+            [_venv_python(), ENGINE, payload],
+            capture_output=True, text=True, env=proc_env,
+        )
+        if res.returncode != 0:
+            _err(f"engine failed: {res.stderr.strip()[:300]}")
+            return 1
+        try:
+            pending = json.loads(res.stdout.strip()) \
+                .get("timings_ms", {}).get("index_pending", 0)
+        except Exception:
+            pending = 0
+        print(res.stdout.strip())
+        if not pending:
+            return 0
+        print(f"still pending: {pending}, continuing...")
+    _err("catchup did not finish after 100 iterations")
+    return 1
 
 def cmd_build():
     if not p.exists(DB_SRC):
